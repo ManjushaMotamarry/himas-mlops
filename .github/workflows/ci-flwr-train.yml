@@ -1,4 +1,3 @@
-# flwr run 
 name: CI - FLWR Train
 
 on:
@@ -44,8 +43,29 @@ jobs:
           pip install hatchling
           pip install .
 
+      # 1️⃣ Train model
       - name: Train (Flower)
         run: flwr run .
+
+      # 2️⃣ Locate & copy model so evaluation can see it
+      - name: Locate and copy trained model (if not in models/)
+        run: |
+          echo "🔍 Checking for trained model files..."
+          find . -type f -name "*.keras" || true
+          mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
+          FOUND=$(find . -type f -name "*.keras" | head -n 1)
+          if [ -n "$FOUND" ]; then
+            echo "✅ Found model at: $FOUND"
+            cp "$FOUND" PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
+          else
+            echo "⚠️ No model file found!"
+          fi
+
+      # 3️⃣ Verify the model exists before evaluation
+      - name: Verify model file exists
+        run: |
+          echo "🧾 Verifying model directory contents..."
+          ls -R PoC/Model-Pipeline/himas-model-pipeline/models || true
 
       - name: Authenticate to GCP for BigQuery access
         env:
