@@ -46,6 +46,17 @@ jobs:
       - name: Train (Flower)
         run: flwr run .
 
+      - name: Authenticate to GCP for BigQuery access
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          echo "$GCP_SA_KEY" > sa-key.json
+          gcloud auth activate-service-account --key-file=sa-key.json
+          gcloud config set project "$GCP_PROJECT_ID"
+          export GOOGLE_APPLICATION_CREDENTIALS=sa-key.json
+
+
       - name: Evaluate
         run: python evaluate_model.py
 
