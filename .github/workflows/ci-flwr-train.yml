@@ -41,44 +41,50 @@ jobs:
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # Step 4: Run model training (Flower Simulation) - WITH DETAILED DEBUGGING
+      # Step 4: Run model training (Flower Simulation) - CAPTURE ALL OUTPUT
       - name: Run federated training
         run: |
           echo "Starting federated training with Flower..."
           cd $GITHUB_WORKSPACE
-          echo "📂 Current working directory: $(pwd)"
-          echo "📂 GitHub workspace: $GITHUB_WORKSPACE"
+          echo "📂 Working directory: $(pwd)"
           
-          echo "📂 Directory structure BEFORE training:"
-          ls -R PoC/Model-Pipeline/himas-model-pipeline/ | head -50
+          echo "🚀 Running Flower training with full output..."
+          flwr run PoC/Model-Pipeline/himas-model-pipeline 2>&1 | tee flower_training.log
+          EXIT_CODE=${PIPESTATUS[0]}
           
-          echo "🚀 Running Flower training..."
-          set -x  # Enable command tracing
-          flwr run PoC/Model-Pipeline/himas-model-pipeline
-          EXIT_CODE=$?
-          set +x  # Disable command tracing
+          echo ""
+          echo "============================================"
+          echo "Training exit code: $EXIT_CODE"
+          echo "============================================"
           
           if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Flower training failed with exit code $EXIT_CODE"
+            echo "❌ Flower training failed"
+            cat flower_training.log
             exit 1
           fi
           
-          echo "✅ Flower training command completed"
+          echo "📋 Last 50 lines of training output:"
+          tail -50 flower_training.log
           
-          echo "📂 Directory structure AFTER training:"
-          ls -R PoC/Model-Pipeline/himas-model-pipeline/ | head -50
+          echo ""
+          echo "🔍 Searching for 'Saving final model' message:"
+          grep -i "saving final model" flower_training.log || echo "⚠️ Model save message NOT found in logs!"
           
-          echo "📂 Searching ENTIRE workspace for .keras files:"
-          find $GITHUB_WORKSPACE -type f -name "*.keras" -exec ls -lh {} \;
+          echo ""
+          echo "🔍 Searching for 'Model saved successfully' message:"
+          grep -i "model saved successfully" flower_training.log || echo "⚠️ Success message NOT found in logs!"
           
-          echo "📂 Searching for 'models' directories:"
-          find $GITHUB_WORKSPACE -type d -name "models" -exec ls -lah {} \;
-          
-          echo "📂 Checking if mlruns was created (MLflow artifacts):"
-          find $GITHUB_WORKSPACE -type d -name "mlruns" -exec ls -lah {} \;
-          
-          echo "📂 Last 30 files modified (to see what was just created):"
-          find $GITHUB_WORKSPACE -type f -mmin -5 | head -30
+          echo ""
+          echo "📂 Searching for .keras files:"
+          find . -type f -name "*.keras" -ls || echo "❌ No .keras files found"
+
+      # Upload training logs for debugging
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-logs
+          path: flower_training.log
 
       # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO - try
       - name: Locate and copy trained model
