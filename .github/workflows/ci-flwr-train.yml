@@ -43,9 +43,15 @@ jobs:
           pip install hatchling
           pip install .
 
-      # 1️⃣ Train model
       - name: Train (Flower)
-        run: flwr run .
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        run: |
+          echo "🚀 Starting Flower training from repo root..."
+          cd ../../../
+          flwr run PoC/Model-Pipeline/himas-model-pipeline
+          echo "✅ Training complete. Checking for model files..."
+          find . -type f -name "*.keras" || true
+
 
       # 2️⃣ Locate & copy model so evaluation can see it
       - name: Locate and copy trained model (if not in models/)
