@@ -54,11 +54,16 @@ jobs:
           echo "$GCP_SA_KEY" > sa-key.json
           gcloud auth activate-service-account --key-file=sa-key.json
           gcloud config set project "$GCP_PROJECT_ID"
+
+      - name: Evaluate Model (with BigQuery auth)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          echo "$GCP_SA_KEY" > sa-key.json
           export GOOGLE_APPLICATION_CREDENTIALS=sa-key.json
-
-
-      - name: Evaluate
-        run: python evaluate_model.py
+          echo "✅ Using GCP project: $GCP_PROJECT_ID"
+          python evaluate_model.py
 
       - name: Validate metrics thresholds (accuracy + recall)
         run: |
