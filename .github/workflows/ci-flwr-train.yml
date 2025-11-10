@@ -41,33 +41,77 @@ jobs:
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # Step 4: Run model training (Flower Simulation)
+      # Step 4: Run model training (Flower Simulation) - WITH DETAILED DEBUGGING
       - name: Run federated training
         run: |
           echo "Starting federated training with Flower..."
           cd $GITHUB_WORKSPACE
+          echo "📂 Current working directory: $(pwd)"
+          echo "📂 GitHub workspace: $GITHUB_WORKSPACE"
+          
+          echo "📂 Directory structure BEFORE training:"
+          ls -R PoC/Model-Pipeline/himas-model-pipeline/ | head -50
+          
+          echo "🚀 Running Flower training..."
+          set -x  # Enable command tracing
           flwr run PoC/Model-Pipeline/himas-model-pipeline
-          echo "✅ Training completed. Checking for model files..."
-          find . -type f -name "*.keras" || true
+          EXIT_CODE=$?
+          set +x  # Disable command tracing
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Flower training failed with exit code $EXIT_CODE"
+            exit 1
+          fi
+          
+          echo "✅ Flower training command completed"
+          
+          echo "📂 Directory structure AFTER training:"
+          ls -R PoC/Model-Pipeline/himas-model-pipeline/ | head -50
+          
+          echo "📂 Searching ENTIRE workspace for .keras files:"
+          find $GITHUB_WORKSPACE -type f -name "*.keras" -exec ls -lh {} \;
+          
+          echo "📂 Searching for 'models' directories:"
+          find $GITHUB_WORKSPACE -type d -name "models" -exec ls -lah {} \;
+          
+          echo "📂 Checking if mlruns was created (MLflow artifacts):"
+          find $GITHUB_WORKSPACE -type d -name "mlruns" -exec ls -lah {} \;
+          
+          echo "📂 Last 30 files modified (to see what was just created):"
+          find $GITHUB_WORKSPACE -type f -mmin -5 | head -30
 
-      # Step 4.5: Locate and organize model file
+      # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO
       - name: Locate and copy trained model
         run: |
           echo "🔍 Locating trained model..."
           cd $GITHUB_WORKSPACE
           
-          # Create models directory
           mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
           
-          # Find the trained model
-          FOUND=$(find . -type f -name "*.keras" | head -n 1)
+          # First, try to find .keras in models/ directory
+          FOUND=$(find PoC/Model-Pipeline/himas-model-pipeline/models -type f -name "*.keras" 2>/dev/null | head -n 1)
+          
+          # If not found, search entire workspace
+          if [ -z "$FOUND" ]; then
+            echo "⚠️ Not found in models/, searching entire workspace..."
+            FOUND=$(find . -type f -name "*.keras" 2>/dev/null | head -n 1)
+          fi
+          
+          # If still not found, check MLflow artifacts
+          if [ -z "$FOUND" ]; then
+            echo "⚠️ Checking MLflow artifacts..."
+            FOUND=$(find . -path "*/mlruns/*/artifacts/*/*.keras" 2>/dev/null | head -n 1)
+          fi
           
           if [ -n "$FOUND" ]; then
             echo "✅ Found model at: $FOUND"
             cp "$FOUND" PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
-            echo "✅ Model copied to models directory"
+            echo "✅ Model copied successfully"
+            ls -lh PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
           else
-            echo "⚠️ No .keras model file found!"
+            echo "❌ No model file found anywhere!"
+            echo "📂 Showing all files created in last 10 minutes:"
+            find . -type f -mmin -10
             exit 1
           fi
 
