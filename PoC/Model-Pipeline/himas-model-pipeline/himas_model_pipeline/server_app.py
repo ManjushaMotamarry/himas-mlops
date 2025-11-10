@@ -78,23 +78,39 @@ def main(grid: Grid, context: Context) -> None:
         )
 
         # Save final model
+        # Save final model
         print("\n" + "="*60)
         print("Federated learning completed!")
         print("="*60)
+
+        # Check if we have valid weights
+        ndarrays = result.arrays.to_numpy_ndarrays()
+        print(f"\nReceived {len(ndarrays)} weight arrays from federated training")
+
+        if len(ndarrays) == 0:
+            raise RuntimeError("Training failed - no weights returned from clients")
 
         output_dir = Path("models")
         output_dir.mkdir(exist_ok=True)
         model_path = output_dir / "himas_federated_mortality_model.keras"
 
-        print(f"\nSaving final model to: {model_path}")
-        ndarrays = result.arrays.to_numpy_ndarrays()
-        model.set_weights(ndarrays)
-        model.save(str(model_path))
+        print(f"\nSaving final model to: {model_path.absolute()}")
 
-        # Track artifacts/model in MLflow (kept simple)
-        mlflow.log_artifact(str(model_path), artifact_path="final_model_artifacts")
-        # Also log as an MLflow model (optional, convenient for loading)
-        mlflow.keras.log_model(model, artifact_path="final_model")
-
-        print("\nModel saved successfully")
-        print("="*60 + "\n")
+        try:
+            model.set_weights(ndarrays)
+            print(f"✅ Weights set successfully ({len(ndarrays)} arrays)")
+            
+            model.save(str(model_path))
+            print(f"✅ Model saved to: {model_path.absolute()}")
+            
+            # Verify file exists
+            if model_path.exists():
+                print(f"✅ Verified: Model file exists ({model_path.stat().st_size} bytes)")
+            else:
+                raise FileNotFoundError(f"Model save reported success but file doesn't exist!")
+                
+        except Exception as e:
+            print(f"❌ Error during model save: {e}")
+            print(f"   Working directory: {Path.cwd().absolute()}")
+            print(f"   Attempted save path: {model_path.absolute()}")
+            raise
