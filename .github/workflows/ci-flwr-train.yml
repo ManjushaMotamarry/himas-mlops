@@ -40,122 +40,47 @@ jobs:
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # Step 3.5: Set up GCP credentials BEFORE training
-      - name: Set up GCP credentials for Flower
+      # Step 3.5: AUTHENTICATE TO GCP BEFORE TRAINING
+      - name: Set up GCP credentials
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
-            echo "❌ GCP secrets not configured. Cannot train with BigQuery data."
+            echo "❌ GCP secrets not configured!"
             exit 1
           fi
           
-          echo "🔐 Creating service account key file..."
-          # Create in repo root so all processes can access it
           cd $GITHUB_WORKSPACE
           echo "$GCP_SA_KEY" > gcp-sa-key.json
           
-          # Set up gcloud CLI
           gcloud auth activate-service-account --key-file=gcp-sa-key.json
           gcloud config set project "$GCP_PROJECT_ID"
           
-          # Export for all subsequent steps
+          # Export credentials for all subsequent steps
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-sa-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT_ID=$GCP_PROJECT_ID" >> $GITHUB_ENV
           
-          echo "✅ GCP credentials configured at: $GITHUB_WORKSPACE/gcp-sa-key.json"
+          echo "✅ GCP credentials configured"
 
-      # Step 4: Run model training (Flower Simulation) - WITH CREDENTIALS
+      # Step 4: Run model training (Flower Simulation) - WITH CREDENTIALS AVAILABLE
       - name: Run federated training
-        run: |
-          echo "Starting federated training with Flower..."
-          cd $GITHUB_WORKSPACE
-          
-          echo "🔐 Credentials file: $GOOGLE_APPLICATION_CREDENTIALS"
-          echo "📂 Verifying credentials file exists:"
-          ls -lh $GOOGLE_APPLICATION_CREDENTIALS
-          
-          echo "🚀 Running Flower training..."
-          flwr run PoC/Model-Pipeline/himas-model-pipeline 2>&1 | tee flower_training.log
-          EXIT_CODE=${PIPESTATUS[0]}
-          
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Flower training failed"
-            echo "📋 Last 50 lines of output:"
-            tail -50 flower_training.log
-            exit 1
-          fi
-          
-          echo "✅ Training completed successfully"
-          echo "📂 Searching for model files:"
-          find . -type f -name "*.keras" -exec ls -lh {} \;
-
-      - name: Upload training logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: training-logs
-          path: flower_training.log
-
-      # Step 4.5: Locate and organize model file
-      - name: Locate and copy trained model
-        run: |
-          echo "🔍 Locating trained model..."
-          cd $GITHUB_WORKSPACE
-          
-          # Search for model file
-          FOUND=$(find . -type f -name "*.keras" 2>/dev/null | head -n 1)
-          
-          if [ -z "$FOUND" ]; then
-            echo "⚠️ Checking MLflow artifacts..."
-            FOUND=$(find . -path "*/mlruns/*/artifacts/*/*.keras" 2>/dev/null | head -n 1)
-          fi
-          
-          if [ -n "$FOUND" ]; then
-            echo "✅ Found model at: $FOUND"
-            
-            # Create models directory in the correct location
-            mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
-            
-            # Copy model
-            cp "$FOUND" PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
-            echo "✅ Model copied successfully"
-            ls -lh PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
-          else
-            echo "❌ No model file found anywhere!"
-            echo "📋 Checking training log for model save message:"
-            grep -i "saving final model" flower_training.log || echo "Model save message not found"
-            echo "📂 All recently created files:"
-            find . -type f -mmin -10 | head -50
-            exit 1
-          fi
-
-      # Step 5: Verify model exists
-      - name: Verify model file exists
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "🧾 Verifying model file..."
-          if [ -f "models/himas_federated_mortality_model.keras" ]; then
-            echo "✅ Model file exists!"
-            ls -lh models/himas_federated_mortality_model.keras
-          else
-            echo "❌ Model file not found!"
-            exit 1
-          fi
+          echo "Starting federated training with Flower..."
+          echo "🔐 Credentials: $GOOGLE_APPLICATION_CREDENTIALS"
+          flwr run .
 
-      # Step 6: Evaluate model
+      # Step 5: Evaluate model
       - name: Evaluate model
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
           echo "Creating evaluation_results directory..."
           mkdir -p evaluation_results
-          
-          echo "🔐 Using credentials: $GOOGLE_APPLICATION_CREDENTIALS"
           echo "Running evaluation step..."
           python evaluate_model.py
 
-      # Step 7: Save evaluation artifacts
+      # Step 6: Save evaluation artifacts
       - name: Upload evaluation results
         if: always()
         uses: actions/upload-artifact@v4
@@ -163,7 +88,7 @@ jobs:
           name: evaluation-results
           path: PoC/Model-Pipeline/himas-model-pipeline/evaluation_results/
 
-      # Step 8: Validate model performance threshold
+      # Step 7: Validate model performance threshold
       - name: Validate model performance thresholds
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
@@ -200,7 +125,7 @@ jobs:
             echo "🎉 All validation checks passed!"
           fi
 
-      # Step 9: Bias detection across hospitals
+      # Step 8: Bias detection across hospitals
       - name: Bias detection across hospitals
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
@@ -243,13 +168,11 @@ jobs:
           
           echo "✅ Bias check passed"
 
-      # Step 10: Upload model to GCS
+      # Step 9: Upload model to GCS
       - name: Upload Model to GCS
         if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature_manjusha')
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "🔐 Using existing GCP authentication..."
-          
           TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
           MODEL_PATH="models/himas_federated_mortality_model.keras"
           DEST_PATH="gs://himas-mlops-models/model_${TIMESTAMP}.keras"
