@@ -41,50 +41,55 @@ jobs:
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # Step 4: Run model training (Flower Simulation) - CAPTURE ALL OUTPUT
+      
+        # Step 4: Run model training WITH LOG INSPECTION
       - name: Run federated training
         run: |
           echo "Starting federated training with Flower..."
           cd $GITHUB_WORKSPACE
           echo "📂 Working directory: $(pwd)"
           
-          echo "🚀 Running Flower training with full output..."
+          echo "🚀 Running Flower training..."
           flwr run PoC/Model-Pipeline/himas-model-pipeline 2>&1 | tee flower_training.log
           EXIT_CODE=${PIPESTATUS[0]}
           
-          echo ""
-          echo "============================================"
-          echo "Training exit code: $EXIT_CODE"
-          echo "============================================"
-          
           if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Flower training failed"
-            cat flower_training.log
+            echo "❌ Flower training failed with exit code $EXIT_CODE"
             exit 1
           fi
           
-          echo "📋 Last 50 lines of training output:"
-          tail -50 flower_training.log
+          echo ""
+          echo "============================================"
+          echo "📋 TRAINING LOG OUTPUT (last 100 lines):"
+          echo "============================================"
+          tail -100 flower_training.log
           
           echo ""
-          echo "🔍 Searching for 'Saving final model' message:"
-          grep -i "saving final model" flower_training.log || echo "⚠️ Model save message NOT found in logs!"
+          echo "🔍 Checking for model save messages:"
+          if grep -q "Saving final model" flower_training.log; then
+            echo "✅ Found 'Saving final model' message"
+            grep -A 5 "Saving final model" flower_training.log
+          else
+            echo "❌ 'Saving final model' message NOT found!"
+          fi
+          
+          if grep -q "Model saved successfully" flower_training.log; then
+            echo "✅ Found 'Model saved successfully' message"
+          else
+            echo "❌ 'Model saved successfully' message NOT found!"
+          fi
           
           echo ""
-          echo "🔍 Searching for 'Model saved successfully' message:"
-          grep -i "model saved successfully" flower_training.log || echo "⚠️ Success message NOT found in logs!"
-          
-          echo ""
-          echo "📂 Searching for .keras files:"
-          find . -type f -name "*.keras" -ls || echo "❌ No .keras files found"
+          echo "🔍 Searching for model files IMMEDIATELY after training:"
+          find . -type f -name "*.keras" -exec ls -lh {} \;
 
-      # Upload training logs for debugging
       - name: Upload training logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: training-logs
           path: flower_training.log
+
 
       # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO - try
       - name: Locate and copy trained model
