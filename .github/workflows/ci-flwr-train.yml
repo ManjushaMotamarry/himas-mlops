@@ -37,75 +37,76 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq bc
-          # Install gcloud CLI
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # Step 3.5: Authenticate to GCP BEFORE training
-      - name: Authenticate to GCP for Flower training
+      # Step 3.5: Set up GCP credentials BEFORE training
+      - name: Set up GCP credentials for Flower
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
           if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
-            echo "⚠️ GCP secrets not configured. Cannot run training with BigQuery data."
+            echo "❌ GCP secrets not configured. Cannot train with BigQuery data."
             exit 1
           fi
           
-          echo "🔐 Setting up GCP authentication for Flower training..."
-          echo "$GCP_SA_KEY" > sa-key.json
-          export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/sa-key.json"
-          gcloud auth activate-service-account --key-file=sa-key.json
+          echo "🔐 Creating service account key file..."
+          # Create in repo root so all processes can access it
+          cd $GITHUB_WORKSPACE
+          echo "$GCP_SA_KEY" > gcp-sa-key.json
+          
+          # Set up gcloud CLI
+          gcloud auth activate-service-account --key-file=gcp-sa-key.json
           gcloud config set project "$GCP_PROJECT_ID"
           
-          # Make credentials available to all processes
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/sa-key.json" >> $GITHUB_ENV
+          # Export for all subsequent steps
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-sa-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT_ID=$GCP_PROJECT_ID" >> $GITHUB_ENV
-          echo "✅ GCP authentication configured"
+          
+          echo "✅ GCP credentials configured at: $GITHUB_WORKSPACE/gcp-sa-key.json"
 
-      # Step 4: Run model training (Flower Simulation) - NOW WITH CREDENTIALS
+      # Step 4: Run model training (Flower Simulation) - WITH CREDENTIALS
       - name: Run federated training
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
-          GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
         run: |
           echo "Starting federated training with Flower..."
           cd $GITHUB_WORKSPACE
-          echo "🔐 GCP Credentials: $GOOGLE_APPLICATION_CREDENTIALS"
-          echo "📂 Working directory: $(pwd)"
+          
+          echo "🔐 Credentials file: $GOOGLE_APPLICATION_CREDENTIALS"
+          echo "📂 Verifying credentials file exists:"
+          ls -lh $GOOGLE_APPLICATION_CREDENTIALS
           
           echo "🚀 Running Flower training..."
-          flwr run PoC/Model-Pipeline/himas-model-pipeline
+          flwr run PoC/Model-Pipeline/himas-model-pipeline 2>&1 | tee flower_training.log
+          EXIT_CODE=${PIPESTATUS[0]}
           
-          if [ $? -ne 0 ]; then
+          if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ Flower training failed"
+            echo "📋 Last 50 lines of output:"
+            tail -50 flower_training.log
             exit 1
           fi
           
           echo "✅ Training completed successfully"
           echo "📂 Searching for model files:"
-          find . -type f -name "*.keras" -ls
+          find . -type f -name "*.keras" -exec ls -lh {} \;
 
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-logs
+          path: flower_training.log
 
-      # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO - try
+      # Step 4.5: Locate and organize model file
       - name: Locate and copy trained model
         run: |
           echo "🔍 Locating trained model..."
           cd $GITHUB_WORKSPACE
           
-          mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
+          # Search for model file
+          FOUND=$(find . -type f -name "*.keras" 2>/dev/null | head -n 1)
           
-          # First, try to find .keras in models/ directory
-          FOUND=$(find PoC/Model-Pipeline/himas-model-pipeline/models -type f -name "*.keras" 2>/dev/null | head -n 1)
-          
-          # If not found, search entire workspace
-          if [ -z "$FOUND" ]; then
-            echo "⚠️ Not found in models/, searching entire workspace..."
-            FOUND=$(find . -type f -name "*.keras" 2>/dev/null | head -n 1)
-          fi
-          
-          # If still not found, check MLflow artifacts
           if [ -z "$FOUND" ]; then
             echo "⚠️ Checking MLflow artifacts..."
             FOUND=$(find . -path "*/mlruns/*/artifacts/*/*.keras" 2>/dev/null | head -n 1)
@@ -113,17 +114,24 @@ jobs:
           
           if [ -n "$FOUND" ]; then
             echo "✅ Found model at: $FOUND"
+            
+            # Create models directory in the correct location
+            mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
+            
+            # Copy model
             cp "$FOUND" PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
             echo "✅ Model copied successfully"
             ls -lh PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
           else
             echo "❌ No model file found anywhere!"
-            echo "📂 Showing all files created in last 10 minutes:"
-            find . -type f -mmin -10
+            echo "📋 Checking training log for model save message:"
+            grep -i "saving final model" flower_training.log || echo "Model save message not found"
+            echo "📂 All recently created files:"
+            find . -type f -mmin -10 | head -50
             exit 1
           fi
 
-      # Step 4.6: Verify model exists
+      # Step 5: Verify model exists
       - name: Verify model file exists
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
@@ -133,47 +141,17 @@ jobs:
             ls -lh models/himas_federated_mortality_model.keras
           else
             echo "❌ Model file not found!"
-            ls -R models/ || echo "models/ directory is empty or missing"
             exit 1
           fi
-
-      # Step 5: Authenticate to GCP (if secrets are available)
-      - name: Authenticate to GCP
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature_manjusha')
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        working-directory: PoC/Model-Pipeline/himas-model-pipeline
-        run: |
-          if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
-            echo "⚠️ GCP secrets not configured. Skipping authentication."
-            exit 0
-          fi
-          
-          echo "🔐 Authenticating to GCP..."
-          echo "$GCP_SA_KEY" > sa-key.json
-          gcloud auth activate-service-account --key-file=sa-key.json
-          gcloud config set project "$GCP_PROJECT_ID"
-          echo "✅ GCP authentication successful"
 
       # Step 6: Evaluate model
       - name: Evaluate model
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           echo "Creating evaluation_results directory..."
           mkdir -p evaluation_results
           
-          # Set up GCP credentials if available
-          if [ -n "$GCP_SA_KEY" ] && [ -n "$GCP_PROJECT_ID" ]; then
-            echo "🔐 Setting up BigQuery authentication..."
-            echo "$GCP_SA_KEY" > sa-key.json
-            export GOOGLE_APPLICATION_CREDENTIALS=sa-key.json
-            echo "✅ Using GCP project: $GCP_PROJECT_ID"
-          fi
-          
+          echo "🔐 Using credentials: $GOOGLE_APPLICATION_CREDENTIALS"
           echo "Running evaluation step..."
           python evaluate_model.py
 
@@ -191,19 +169,16 @@ jobs:
         run: |
           echo "🔍 Validating multiple model metrics (accuracy + recall)..."
 
-          # Extract metrics for AGGREGATED results
           ACCURACY=$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
           RECALL=$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
 
           echo "Aggregated Accuracy: $ACCURACY"
           echo "Aggregated Recall: $RECALL"
 
-          # Define thresholds
           ACC_THRESHOLD=0.85
           REC_THRESHOLD=0.60
           FAIL=false
 
-          # Check accuracy
           if (( $(echo "$ACCURACY < $ACC_THRESHOLD" | bc -l) )); then
             echo "❌ Model accuracy ($ACCURACY) below threshold ($ACC_THRESHOLD)"
             FAIL=true
@@ -211,7 +186,6 @@ jobs:
             echo "✅ Model accuracy passes threshold"
           fi
 
-          # Check recall
           if (( $(echo "$RECALL < $REC_THRESHOLD" | bc -l) )); then
             echo "❌ Model recall ($RECALL) below threshold ($REC_THRESHOLD)"
             FAIL=true
@@ -219,7 +193,6 @@ jobs:
             echo "✅ Model recall passes threshold"
           fi
 
-          # Final decision
           if [ "$FAIL" = true ]; then
             echo "🚫 Model failed validation checks — stopping pipeline."
             exit 1
@@ -270,24 +243,12 @@ jobs:
           
           echo "✅ Bias check passed"
 
-      # Step 10: Upload model to GCS (only if all checks pass and secrets exist)
+      # Step 10: Upload model to GCS
       - name: Upload Model to GCS
         if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature_manjusha')
-        env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          # Check if secrets are available
-          if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
-            echo "⚠️ GCP secrets not configured. Skipping model upload."
-            exit 0
-          fi
-          
-          echo "🔐 Authenticating to GCP for model upload..."
-          echo "$GCP_SA_KEY" > sa-key.json
-          gcloud auth activate-service-account --key-file=sa-key.json
-          gcloud config set project "$GCP_PROJECT_ID"
+          echo "🔐 Using existing GCP authentication..."
           
           TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
           MODEL_PATH="models/himas_federated_mortality_model.keras"
