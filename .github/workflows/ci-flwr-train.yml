@@ -44,34 +44,48 @@ jobs:
           pip install .
 
       - name: Train (Flower)
-        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        working-directory: .
         run: |
           echo "🚀 Starting Flower training from repo root..."
-          cd ../../../
+          cd $GITHUB_WORKSPACE
           flwr run PoC/Model-Pipeline/himas-model-pipeline
           echo "✅ Training complete. Checking for model files..."
           find . -type f -name "*.keras" || true
-
 
       # 2️⃣ Locate & copy model so evaluation can see it
       - name: Locate and copy trained model (if not in models/)
         run: |
           echo "🔍 Checking for trained model files..."
+          cd $GITHUB_WORKSPACE
           find . -type f -name "*.keras" || true
+          
           mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
           FOUND=$(find . -type f -name "*.keras" | head -n 1)
           if [ -n "$FOUND" ]; then
             echo "✅ Found model at: $FOUND"
             cp "$FOUND" PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
+            echo "✅ Copied to: PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras"
           else
             echo "⚠️ No model file found!"
+            exit 1
           fi
 
       # 3️⃣ Verify the model exists before evaluation
       - name: Verify model file exists
         run: |
           echo "🧾 Verifying model directory contents..."
-          ls -R PoC/Model-Pipeline/himas-model-pipeline/models || true
+          if [ -d "models/" ]; then
+            ls -lah models/
+            if [ -f "models/himas_federated_mortality_model.keras" ]; then
+              echo "✅ Model file exists!"
+            else
+              echo "❌ Model file not found in models/"
+              exit 1
+            fi
+          else
+            echo "❌ models/ directory not found"
+            exit 1
+          fi
 
       - name: Authenticate to GCP for BigQuery access
         env:
