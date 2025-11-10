@@ -15,17 +15,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout the repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Set up Python
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # Step 3: Install dependencies
       - name: Install dependencies
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
@@ -33,54 +30,97 @@ jobs:
           pip install hatchling
           pip install .
 
-      - name: Install system dependencies (jq, bc, gcloud)
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y jq bc
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # Step 3.5: AUTHENTICATE TO GCP BEFORE TRAINING
-      - name: Set up GCP credentials
+      # CRITICAL: Set up GCP auth BEFORE training
+      - name: Authenticate to GCP
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
-            echo "❌ GCP secrets not configured!"
+            echo "❌ GCP secrets missing!"
             exit 1
           fi
           
           cd $GITHUB_WORKSPACE
+          
+          # Create credentials file
           echo "$GCP_SA_KEY" > gcp-sa-key.json
           
+          # Authenticate gcloud
           gcloud auth activate-service-account --key-file=gcp-sa-key.json
           gcloud config set project "$GCP_PROJECT_ID"
           
-          # Export credentials for all subsequent steps
+          # CRITICAL: Export to $GITHUB_ENV so it persists to next steps
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-sa-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT_ID=$GCP_PROJECT_ID" >> $GITHUB_ENV
           
-          echo "✅ GCP credentials configured"
+          echo "✅ Credentials configured at: $GITHUB_WORKSPACE/gcp-sa-key.json"
+          ls -lh gcp-sa-key.json
 
-      # Step 4: Run model training (Flower Simulation) - WITH CREDENTIALS AVAILABLE
+      # Run training with credentials available
       - name: Run federated training
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "Starting federated training with Flower..."
-          echo "🔐 Credentials: $GOOGLE_APPLICATION_CREDENTIALS"
-          flwr run .
+          echo "🚀 Starting Flower training..."
+          echo "🔐 Using credentials: $GOOGLE_APPLICATION_CREDENTIALS"
+          
+          # Verify credentials are accessible
+          if [ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+            echo "❌ Credentials file not found!"
+            exit 1
+          fi
+          
+          flwr run . 2>&1 | tee ../../../flower_training.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Training failed with exit code $EXIT_CODE"
+            echo "📋 Last 100 lines:"
+            tail -100 ../../../flower_training.log
+            exit 1
+          fi
+          
+          echo "✅ Training completed"
 
-      # Step 5: Evaluate model
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-logs
+          path: flower_training.log
+
+      - name: Verify model was saved
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        run: |
+          echo "🔍 Checking for model file..."
+          if [ -f "models/himas_federated_mortality_model.keras" ]; then
+            echo "✅ Model exists!"
+            ls -lh models/himas_federated_mortality_model.keras
+          else
+            echo "❌ Model not found!"
+            echo "📂 Contents of models/ directory:"
+            ls -lah models/ || echo "models/ doesn't exist"
+            
+            echo ""
+            echo "📋 Checking training log for errors:"
+            grep -A 20 "Saving final model" ../../../flower_training.log || echo "Not in log"
+            
+            exit 1
+          fi
+
       - name: Evaluate model
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "Creating evaluation_results directory..."
           mkdir -p evaluation_results
-          echo "Running evaluation step..."
           python evaluate_model.py
 
-      # Step 6: Save evaluation artifacts
       - name: Upload evaluation results
         if: always()
         uses: actions/upload-artifact@v4
@@ -88,49 +128,39 @@ jobs:
           name: evaluation-results
           path: PoC/Model-Pipeline/himas-model-pipeline/evaluation_results/
 
-      # Step 7: Validate model performance threshold
       - name: Validate model performance thresholds
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "🔍 Validating multiple model metrics (accuracy + recall)..."
+          echo "🔍 Validating model metrics..."
 
           ACCURACY=$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
           RECALL=$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
 
-          echo "Aggregated Accuracy: $ACCURACY"
-          echo "Aggregated Recall: $RECALL"
+          echo "Accuracy: $ACCURACY | Recall: $RECALL"
 
           ACC_THRESHOLD=0.85
           REC_THRESHOLD=0.60
           FAIL=false
 
           if (( $(echo "$ACCURACY < $ACC_THRESHOLD" | bc -l) )); then
-            echo "❌ Model accuracy ($ACCURACY) below threshold ($ACC_THRESHOLD)"
+            echo "❌ Accuracy below threshold"
             FAIL=true
-          else
-            echo "✅ Model accuracy passes threshold"
           fi
 
           if (( $(echo "$RECALL < $REC_THRESHOLD" | bc -l) )); then
-            echo "❌ Model recall ($RECALL) below threshold ($REC_THRESHOLD)"
+            echo "❌ Recall below threshold"
             FAIL=true
-          else
-            echo "✅ Model recall passes threshold"
           fi
 
           if [ "$FAIL" = true ]; then
-            echo "🚫 Model failed validation checks — stopping pipeline."
             exit 1
-          else
-            echo "🎉 All validation checks passed!"
           fi
+          
+          echo "✅ All thresholds passed"
 
-      # Step 8: Bias detection across hospitals
-      - name: Bias detection across hospitals
+      - name: Bias detection
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "🔍 Running bias detection across hospital slices..."
-          
           AGG_ACC=$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
           AGG_REC=$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
           
@@ -151,32 +181,22 @@ jobs:
             echo "Hospital $H → |Δacc|=$A_ABS | |Δrec|=$R_ABS"
             
             if (( $(echo "$A_ABS > $ACC_TOL" | bc -l) )); then
-              echo "⚠️ Accuracy bias detected for $H"
+              echo "⚠️ Accuracy bias: $H"
               FAIL=true
             fi
             
             if (( $(echo "$R_ABS > $REC_TOL" | bc -l) )); then
-              echo "⚠️ Recall bias detected for $H"
+              echo "⚠️ Recall bias: $H"
               FAIL=true
             fi
           done
           
-          if [ "$FAIL" = true ]; then
-            echo "🚫 Bias check failed"
-            exit 1
-          fi
-          
-          echo "✅ Bias check passed"
+          [ "$FAIL" = true ] && exit 1 || echo "✅ Bias check passed"
 
-      # Step 9: Upload model to GCS
-      - name: Upload Model to GCS
-        if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature_manjusha')
+      - name: Upload to GCS
+        if: success() && github.event_name == 'push'
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
           TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-          MODEL_PATH="models/himas_federated_mortality_model.keras"
-          DEST_PATH="gs://himas-mlops-models/model_${TIMESTAMP}.keras"
-          
-          echo "📦 Uploading $MODEL_PATH to $DEST_PATH..."
-          gsutil cp "$MODEL_PATH" "$DEST_PATH"
-          echo "✅ Model successfully uploaded to GCS: $DEST_PATH"
+          gsutil cp models/himas_federated_mortality_model.keras gs://himas-mlops-models/model_${TIMESTAMP}.keras
+          echo "✅ Uploaded to GCS"
