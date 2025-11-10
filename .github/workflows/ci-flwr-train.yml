@@ -41,54 +41,51 @@ jobs:
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      
-        # Step 4: Run model training WITH LOG INSPECTION
-      - name: Run federated training
+      # Step 3.5: Authenticate to GCP BEFORE training
+      - name: Authenticate to GCP for Flower training
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "Starting federated training with Flower..."
-          cd $GITHUB_WORKSPACE
-          echo "📂 Working directory: $(pwd)"
-          
-          echo "🚀 Running Flower training..."
-          flwr run PoC/Model-Pipeline/himas-model-pipeline 2>&1 | tee flower_training.log
-          EXIT_CODE=${PIPESTATUS[0]}
-          
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Flower training failed with exit code $EXIT_CODE"
+          if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
+            echo "⚠️ GCP secrets not configured. Cannot run training with BigQuery data."
             exit 1
           fi
           
-          echo ""
-          echo "============================================"
-          echo "📋 TRAINING LOG OUTPUT (last 100 lines):"
-          echo "============================================"
-          tail -100 flower_training.log
+          echo "🔐 Setting up GCP authentication for Flower training..."
+          echo "$GCP_SA_KEY" > sa-key.json
+          export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/sa-key.json"
+          gcloud auth activate-service-account --key-file=sa-key.json
+          gcloud config set project "$GCP_PROJECT_ID"
           
-          echo ""
-          echo "🔍 Checking for model save messages:"
-          if grep -q "Saving final model" flower_training.log; then
-            echo "✅ Found 'Saving final model' message"
-            grep -A 5 "Saving final model" flower_training.log
-          else
-            echo "❌ 'Saving final model' message NOT found!"
-          fi
-          
-          if grep -q "Model saved successfully" flower_training.log; then
-            echo "✅ Found 'Model saved successfully' message"
-          else
-            echo "❌ 'Model saved successfully' message NOT found!"
-          fi
-          
-          echo ""
-          echo "🔍 Searching for model files IMMEDIATELY after training:"
-          find . -type f -name "*.keras" -exec ls -lh {} \;
+          # Make credentials available to all processes
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/sa-key.json" >> $GITHUB_ENV
+          echo "GCP_PROJECT_ID=$GCP_PROJECT_ID" >> $GITHUB_ENV
+          echo "✅ GCP authentication configured"
 
-      - name: Upload training logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: training-logs
-          path: flower_training.log
+      # Step 4: Run model training (Flower Simulation) - NOW WITH CREDENTIALS
+      - name: Run federated training
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
+          GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
+        run: |
+          echo "Starting federated training with Flower..."
+          cd $GITHUB_WORKSPACE
+          echo "🔐 GCP Credentials: $GOOGLE_APPLICATION_CREDENTIALS"
+          echo "📂 Working directory: $(pwd)"
+          
+          echo "🚀 Running Flower training..."
+          flwr run PoC/Model-Pipeline/himas-model-pipeline
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Flower training failed"
+            exit 1
+          fi
+          
+          echo "✅ Training completed successfully"
+          echo "📂 Searching for model files:"
+          find . -type f -name "*.keras" -ls
 
 
       # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO - try
