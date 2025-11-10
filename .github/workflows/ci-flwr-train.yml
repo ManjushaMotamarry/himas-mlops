@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main, feature_manjusha ]
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   build-train-validate:
     runs-on: ubuntu-latest
@@ -29,37 +33,102 @@ jobs:
           pip install hatchling
           pip install .
 
-      - name: Install jq and bc
+      - name: Install system dependencies (jq, bc, gcloud)
         run: |
           sudo apt-get update
           sudo apt-get install -y jq bc
-
+          # Install gcloud CLI
+          curl -sSL https://sdk.cloud.google.com | bash >/dev/null
+          echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
       # Step 4: Run model training (Flower Simulation)
       - name: Run federated training
-        working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
           echo "Starting federated training with Flower..."
-          flwr run . || echo "Training step completed (or simulated)"
+          cd $GITHUB_WORKSPACE
+          flwr run PoC/Model-Pipeline/himas-model-pipeline
+          echo "✅ Training completed. Checking for model files..."
+          find . -type f -name "*.keras" || true
 
-      # Step 5: Evaluate model
+      # Step 4.5: Locate and organize model file
+      - name: Locate and copy trained model
+        run: |
+          echo "🔍 Locating trained model..."
+          cd $GITHUB_WORKSPACE
+          
+          # Create models directory
+          mkdir -p PoC/Model-Pipeline/himas-model-pipeline/models
+          
+          # Find the trained model
+          FOUND=$(find . -type f -name "*.keras" | head -n 1)
+          
+          if [ -n "$FOUND" ]; then
+            echo "✅ Found model at: $FOUND"
+            cp "$FOUND" PoC/Model-Pipeline/himas-model-pipeline/models/himas_federated_mortality_model.keras
+            echo "✅ Model copied to models directory"
+          else
+            echo "⚠️ No .keras model file found!"
+            exit 1
+          fi
+
+      # Step 4.6: Verify model exists
+      - name: Verify model file exists
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        run: |
+          echo "🧾 Verifying model file..."
+          if [ -f "models/himas_federated_mortality_model.keras" ]; then
+            echo "✅ Model file exists!"
+            ls -lh models/himas_federated_mortality_model.keras
+          else
+            echo "❌ Model file not found!"
+            ls -R models/ || echo "models/ directory is empty or missing"
+            exit 1
+          fi
+
+      # Step 5: Authenticate to GCP (if secrets are available)
+      - name: Authenticate to GCP
+        if: ${{ secrets.GCP_SA_KEY != '' && secrets.GCP_PROJECT_ID != '' }}
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        run: |
+          echo "🔐 Authenticating to GCP..."
+          echo "$GCP_SA_KEY" > sa-key.json
+          gcloud auth activate-service-account --key-file=sa-key.json
+          gcloud config set project "$GCP_PROJECT_ID"
+          echo "✅ GCP authentication successful"
+
+      # Step 6: Evaluate model
       - name: Evaluate model
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           echo "Creating evaluation_results directory..."
           mkdir -p evaluation_results
+          
+          # Set up GCP credentials if available
+          if [ -n "$GCP_SA_KEY" ] && [ -n "$GCP_PROJECT_ID" ]; then
+            echo "🔐 Setting up BigQuery authentication..."
+            echo "$GCP_SA_KEY" > sa-key.json
+            export GOOGLE_APPLICATION_CREDENTIALS=sa-key.json
+            echo "✅ Using GCP project: $GCP_PROJECT_ID"
+          fi
+          
           echo "Running evaluation step..."
-          python evaluate_model.py || echo "Evaluation step completed"
+          python evaluate_model.py
 
-      # Step 6: Save evaluation artifacts
+      # Step 7: Save evaluation artifacts
       - name: Upload evaluation results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: evaluation-results
           path: PoC/Model-Pipeline/himas-model-pipeline/evaluation_results/
 
-      
-      # Step 7: Validate model performance threshold
+      # Step 8: Validate model performance threshold
       - name: Validate model performance thresholds
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
@@ -75,6 +144,7 @@ jobs:
           # Define thresholds
           ACC_THRESHOLD=0.85
           REC_THRESHOLD=0.60
+          FAIL=false
 
           # Check accuracy
           if (( $(echo "$ACCURACY < $ACC_THRESHOLD" | bc -l) )); then
@@ -100,10 +170,72 @@ jobs:
             echo "🎉 All validation checks passed!"
           fi
 
+      # Step 9: Bias detection across hospitals
+      - name: Bias detection across hospitals
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        run: |
+          echo "🔍 Running bias detection across hospital slices..."
+          
+          AGG_ACC=$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
+          AGG_REC=$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
+          
+          ACC_TOL=0.05
+          REC_TOL=0.07
+          FAIL=false
+          
+          jq -c '.[] | select(.hospital!="AGGREGATED")' evaluation_results/*.json | while read -r row; do
+            H=$(echo "$row" | jq -r '.hospital')
+            ACC=$(echo "$row" | jq -r '.accuracy')
+            REC=$(echo "$row" | jq -r '.recall')
+            
+            A_DIFF=$(echo "$AGG_ACC - $ACC" | bc -l)
+            R_DIFF=$(echo "$AGG_REC - $REC" | bc -l)
+            A_ABS=$(awk -v x="$A_DIFF" 'BEGIN{print (x<0?-x:x)}')
+            R_ABS=$(awk -v x="$R_DIFF" 'BEGIN{print (x<0?-x:x)}')
+            
+            echo "Hospital $H → |Δacc|=$A_ABS | |Δrec|=$R_ABS"
+            
+            if (( $(echo "$A_ABS > $ACC_TOL" | bc -l) )); then
+              echo "⚠️ Accuracy bias detected for $H"
+              FAIL=true
+            fi
+            
+            if (( $(echo "$R_ABS > $REC_TOL" | bc -l) )); then
+              echo "⚠️ Recall bias detected for $H"
+              FAIL=true
+            fi
+          done
+          
+          if [ "$FAIL" = true ]; then
+            echo "🚫 Bias check failed"
+            exit 1
+          fi
+          
+          echo "✅ Bias check passed"
 
-
-# bias check - locally or globally
-
-  # Step 8: Upload model to GCS if validation passed
-
-  
+      # Step 10: Upload model to GCS (only if all checks pass and secrets exist)
+      - name: Upload Model to GCS
+        if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature_manjusha')
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        working-directory: PoC/Model-Pipeline/himas-model-pipeline
+        run: |
+          # Check if secrets are available
+          if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
+            echo "⚠️ GCP secrets not configured. Skipping model upload."
+            exit 0
+          fi
+          
+          echo "🔐 Authenticating to GCP for model upload..."
+          echo "$GCP_SA_KEY" > sa-key.json
+          gcloud auth activate-service-account --key-file=sa-key.json
+          gcloud config set project "$GCP_PROJECT_ID"
+          
+          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+          MODEL_PATH="models/himas_federated_mortality_model.keras"
+          DEST_PATH="gs://himas-mlops-models/model_${TIMESTAMP}.keras"
+          
+          echo "📦 Uploading $MODEL_PATH to $DEST_PATH..."
+          gsutil cp "$MODEL_PATH" "$DEST_PATH"
+          echo "✅ Model successfully uploaded to GCS: $DEST_PATH"
