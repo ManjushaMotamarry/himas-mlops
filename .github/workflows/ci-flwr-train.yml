@@ -80,7 +80,7 @@ jobs:
           echo "📂 Last 30 files modified (to see what was just created):"
           find $GITHUB_WORKSPACE -type f -mmin -5 | head -30
 
-      # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO
+      # Step 4.5: Locate and copy trained model - CHECK MLFLOW TOO - try
       - name: Locate and copy trained model
         run: |
           echo "🔍 Locating trained model..."
