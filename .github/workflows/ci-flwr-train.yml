@@ -37,81 +37,43 @@ jobs:
           curl -sSL https://sdk.cloud.google.com | bash >/dev/null
           echo "${HOME}/google-cloud-sdk/bin" >> $GITHUB_PATH
 
-      # CRITICAL: Set up GCP auth BEFORE training
       - name: Authenticate to GCP
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: |
           if [ -z "$GCP_SA_KEY" ] || [ -z "$GCP_PROJECT_ID" ]; then
-            echo "❌ GCP secrets missing!"
+            echo "❌ GCP secrets not configured!"
             exit 1
           fi
           
           cd $GITHUB_WORKSPACE
-          
-          # Create credentials file
           echo "$GCP_SA_KEY" > gcp-sa-key.json
-          
-          # Authenticate gcloud
           gcloud auth activate-service-account --key-file=gcp-sa-key.json
           gcloud config set project "$GCP_PROJECT_ID"
           
-          # CRITICAL: Export to $GITHUB_ENV so it persists to next steps
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-sa-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT_ID=$GCP_PROJECT_ID" >> $GITHUB_ENV
           
-          echo "✅ Credentials configured at: $GITHUB_WORKSPACE/gcp-sa-key.json"
-          ls -lh gcp-sa-key.json
+          echo "✅ GCP authenticated"
 
-      # Run training with credentials available
       - name: Run federated training
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
           echo "🚀 Starting Flower training..."
-          echo "🔐 Using credentials: $GOOGLE_APPLICATION_CREDENTIALS"
-          
-          # Verify credentials are accessible
-          if [ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
-            echo "❌ Credentials file not found!"
-            exit 1
-          fi
-          
-          flwr run . 2>&1 | tee ../../../flower_training.log
-          EXIT_CODE=${PIPESTATUS[0]}
-          
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Training failed with exit code $EXIT_CODE"
-            echo "📋 Last 100 lines:"
-            tail -100 ../../../flower_training.log
-            exit 1
-          fi
-          
-          echo "✅ Training completed"
+          flwr run .
 
-      - name: Upload training logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: training-logs
-          path: flower_training.log
-
-      - name: Verify model was saved
+      - name: Verify model exists
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
-          echo "🔍 Checking for model file..."
+          echo "🔍 Checking for trained model..."
           if [ -f "models/himas_federated_mortality_model.keras" ]; then
-            echo "✅ Model exists!"
+            echo "✅ Model file exists!"
             ls -lh models/himas_federated_mortality_model.keras
           else
-            echo "❌ Model not found!"
-            echo "📂 Contents of models/ directory:"
-            ls -lah models/ || echo "models/ doesn't exist"
-            
-            echo ""
-            echo "📋 Checking training log for errors:"
-            grep -A 20 "Saving final model" ../../../flower_training.log || echo "Not in log"
-            
+            echo "❌ Model file not found at expected location!"
+            echo "📂 Searching workspace:"
+            find $GITHUB_WORKSPACE -name "*.keras" -type f 2>/dev/null || echo "No .keras files found"
             exit 1
           fi
 
@@ -143,24 +105,30 @@ jobs:
           FAIL=false
 
           if (( $(echo "$ACCURACY < $ACC_THRESHOLD" | bc -l) )); then
-            echo "❌ Accuracy below threshold"
+            echo "❌ Accuracy ($ACCURACY) below threshold ($ACC_THRESHOLD)"
             FAIL=true
+          else
+            echo "✅ Accuracy passes"
           fi
 
           if (( $(echo "$RECALL < $REC_THRESHOLD" | bc -l) )); then
-            echo "❌ Recall below threshold"
+            echo "❌ Recall ($RECALL) below threshold ($REC_THRESHOLD)"
             FAIL=true
+          else
+            echo "✅ Recall passes"
           fi
 
           if [ "$FAIL" = true ]; then
             exit 1
           fi
           
-          echo "✅ All thresholds passed"
+          echo "🎉 All validation passed!"
 
-      - name: Bias detection
+      - name: Bias detection across hospitals
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
+          echo "🔍 Bias detection..."
+          
           AGG_ACC=$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
           AGG_REC=$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
           
@@ -178,7 +146,7 @@ jobs:
             A_ABS=$(awk -v x="$A_DIFF" 'BEGIN{print (x<0?-x:x)}')
             R_ABS=$(awk -v x="$R_DIFF" 'BEGIN{print (x<0?-x:x)}')
             
-            echo "Hospital $H → |Δacc|=$A_ABS | |Δrec|=$R_ABS"
+            echo "$H → |Δacc|=$A_ABS |Δrec|=$R_ABS"
             
             if (( $(echo "$A_ABS > $ACC_TOL" | bc -l) )); then
               echo "⚠️ Accuracy bias: $H"
@@ -191,12 +159,20 @@ jobs:
             fi
           done
           
-          [ "$FAIL" = true ] && exit 1 || echo "✅ Bias check passed"
+          if [ "$FAIL" = true ]; then
+            exit 1
+          fi
+          
+          echo "✅ Bias check passed"
 
-      - name: Upload to GCS
-        if: success() && github.event_name == 'push'
+      - name: Upload model to GCS
+        if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature_manjusha')
         working-directory: PoC/Model-Pipeline/himas-model-pipeline
         run: |
           TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-          gsutil cp models/himas_federated_mortality_model.keras gs://himas-mlops-models/model_${TIMESTAMP}.keras
-          echo "✅ Uploaded to GCS"
+          MODEL_PATH="models/himas_federated_mortality_model.keras"
+          DEST_PATH="gs://himas-mlops-models/model_${TIMESTAMP}.keras"
+          
+          echo "📦 Uploading to GCS..."
+          gsutil cp "$MODEL_PATH" "$DEST_PATH"
+          echo "✅ Uploaded: $DEST_PATH"
