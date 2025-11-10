@@ -43,14 +43,13 @@ jobs:
           pip install hatchling
           pip install .
 
-      - name: Train (Flower)
-        working-directory: .
+      - name: Train (Federated model explicitly)
         run: |
-          echo "🚀 Starting Flower training from repo root..."
-          cd $GITHUB_WORKSPACE
-          flwr run PoC/Model-Pipeline/himas-model-pipeline
-          echo "✅ Training complete. Checking for model files..."
+          echo "🚀 Starting federated training via module call"
+          python -m himas_model_pipeline.server_app
+          echo "✅ Training finished, listing model files..."
           find . -type f -name "*.keras" || true
+
 
       # 2️⃣ Locate & copy model so evaluation can see it
       - name: Locate and copy trained model (if not in models/)
