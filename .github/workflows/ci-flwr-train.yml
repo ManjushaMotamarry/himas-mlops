@@ -1,3 +1,4 @@
+# flwr run 
 name: CI - FLWR Train
 
 on:
