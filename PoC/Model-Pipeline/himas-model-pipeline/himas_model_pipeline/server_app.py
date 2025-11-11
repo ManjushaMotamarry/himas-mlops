@@ -53,8 +53,7 @@ def main(grid: Grid, context: Context) -> None:
         })
 
         # Initialize global model with proper input dimension
-        #input_dim = 23  # 15 numerical + 8 categorical features (approximate) ORIGINAL
-        input_dim = 22
+        input_dim = 23
         model = load_model(input_dim)
         arrays = ArrayRecord(model.get_weights())
 
