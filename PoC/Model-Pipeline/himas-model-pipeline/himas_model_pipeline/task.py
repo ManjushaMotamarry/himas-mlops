@@ -14,7 +14,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # Configuration
 PROJECT_ID = "erudite-carving-472018-r5"
-DATASET_ID = "federated_demo"
+DATASET_ID = "federated"
 
 # Hospital mapping
 HOSPITAL_MAPPING = {
