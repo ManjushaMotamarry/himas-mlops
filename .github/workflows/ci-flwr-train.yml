@@ -176,3 +176,15 @@ jobs:
           echo "📦 Uploading to GCS..."
           gsutil cp "$MODEL_PATH" "$DEST_PATH"
           echo "✅ Uploaded: $DEST_PATH"
+# Add this as the LAST step in your cloudbuild.yaml
+
+    - name: 'gcr.io/cloud-builders/gcloud'
+      id: 'notify-success'
+      entrypoint: 'bash'
+      args:
+        - '-c'
+        - |
+          echo "✅ BUILD SUCCESSFUL"
+          echo "Build ID: $BUILD_ID"
+          echo "Model: gs://himas-mlops-models/models/model_$BUILD_ID.keras"
+          echo "Results: gs://himas-mlops-models/evaluation-results/$BUILD_ID/"
