@@ -105,31 +105,31 @@ steps:
       - 'gs://himas-mlops-models/evaluation-results/$BUILD_ID/'
 
   - name: 'gcr.io/cloud-builders/gcloud'
-      id: 'register-model-vertex'
-      entrypoint: 'bash'
-      args:
-        - '-c'
-        - |
-          # Extract metrics from evaluation results
-          cd /workspace
-          ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
-          REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
-          PREC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .precision' evaluation_results/*.json)
-          
-          echo "Registering model in Vertex AI Model Registry..."
-          echo "Accuracy: $$ACC | Recall: $$REC | Precision: $$PREC"
-          
-          # Register model in Vertex AI Model Registry
-          gcloud ai models upload \
-            --region=us-central1 \
-            --display-name=himas-federated-mortality-model \
-            --description="Federated learning model for ICU mortality prediction - Build $BUILD_ID" \
-            --artifact-uri=gs://himas-mlops-models/models/model_$BUILD_ID.keras \
-            --container-image-uri=gcr.io/$PROJECT_ID/himas-training:$BUILD_ID \
-            --version-aliases=build-$BUILD_ID,latest \
-            --project=$PROJECT_ID
-          
-          echo "✅ Model registered in Vertex AI Model Registry"
+    id: 'register-model-vertex'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Extract metrics from evaluation results
+        cd /workspace
+        ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
+        REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
+        PREC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .precision' evaluation_results/*.json)
+        
+        echo "Registering model in Vertex AI Model Registry..."
+        echo "Accuracy: $$ACC | Recall: $$REC | Precision: $$PREC"
+        
+        # Register model in Vertex AI Model Registry
+        gcloud ai models upload \
+          --region=us-central1 \
+          --display-name=himas-federated-mortality-model \
+          --description="Federated learning model for ICU mortality prediction - Build $BUILD_ID" \
+          --artifact-uri=gs://himas-mlops-models/models/model_$BUILD_ID.keras \
+          --container-image-uri=gcr.io/$PROJECT_ID/himas-training:$BUILD_ID \
+          --version-aliases=build-$BUILD_ID,latest \
+          --project=$PROJECT_ID
+        
+        echo "✅ Model registered in Vertex AI Model Registry"
 
 images:
   - 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
