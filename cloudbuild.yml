@@ -291,7 +291,7 @@ steps:
       - '-c'
       - |
         TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
-        MODEL_DIR="gs://himas-mlops-models/models/$${TIMESTAMP}_$$BUILD_ID"
+        MODEL_DIR="gs://himas-mlops-models/models/$${TIMESTAMP}_$BUILD_ID"
         
         echo "Uploading model to: $$MODEL_DIR"
         gsutil cp /workspace/models/himas_federated_mortality_model.keras $${MODEL_DIR}/himas_federated_mortality_model.keras
@@ -307,7 +307,7 @@ steps:
       - '-c'
       - |
         TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
-        RESULTS_DIR="gs://himas-mlops-models/evaluation-results/$${TIMESTAMP}_$$BUILD_ID"
+        RESULTS_DIR="gs://himas-mlops-models/evaluation-results/$${TIMESTAMP}_$BUILD_ID"
         
         echo "Uploading results to: $$RESULTS_DIR"
         gsutil -m cp -r /workspace/evaluation_results/* $${RESULTS_DIR}/
