@@ -1,3 +1,143 @@
+# #change made2
+# steps:
+#   - name: 'gcr.io/cloud-builders/docker'
+#     id: 'build-image'
+#     args:
+#       - 'build'
+#       - '-t'
+#       - 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#       - '-t'
+#       - 'gcr.io/$PROJECT_ID/himas-training:latest'
+#       - '-f'
+#       - 'PoC/Model-Pipeline/himas-model-pipeline/Dockerfile'
+#       - 'PoC/Model-Pipeline/himas-model-pipeline/'
+
+#   - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#     id: 'train-model'
+#     env:
+#       - 'GCP_PROJECT_ID=$PROJECT_ID'
+#       - 'DATASET_ID=federated_demo'
+#     entrypoint: 'bash'
+#     args:
+#       - '-c'
+#       - |
+#         cp -r /workspace/PoC/Model-Pipeline/himas-model-pipeline/* /app/
+#         cd /app
+#         echo "Starting training with federated_demo..."
+#         flwr run .
+#         mkdir -p /workspace/models
+#         cp models/himas_federated_mortality_model.keras /workspace/models/
+#         ls -lh /workspace/models/
+
+#   - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#     id: 'evaluate-model'
+#     env:
+#       - 'GCP_PROJECT_ID=$PROJECT_ID'
+#       - 'DATASET_ID=federated_demo'
+#     entrypoint: 'bash'
+#     args:
+#       - '-c'
+#       - |
+#         cp -r /workspace/PoC/Model-Pipeline/himas-model-pipeline/* /app/
+#         cd /app
+#         mkdir -p models
+#         cp /workspace/models/himas_federated_mortality_model.keras models/
+#         mkdir -p evaluation_results
+#         python evaluate_model.py
+#         cp -r evaluation_results /workspace/
+
+#   - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#     id: 'validate-metrics'
+#     entrypoint: 'bash'
+#     args:
+#       - '-c'
+#       - |
+#         cd /workspace
+#         ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
+#         REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
+#         echo "Accuracy: $$ACC | Recall: $$REC"
+#         if (( $$(echo "$$ACC < 0.85" | bc -l) )); then
+#           exit 1
+#         fi
+#         if (( $$(echo "$$REC < 0.60" | bc -l) )); then
+#           exit 1
+#         fi
+#         echo "Metrics passed"
+
+#   - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#     id: 'bias-detection'
+#     entrypoint: 'bash'
+#     args:
+#       - '-c'
+#       - |
+#         cp -r /workspace/PoC/Model-Pipeline/himas-model-pipeline/* /app/
+#         cd /app
+#         cp -r /workspace/evaluation_results .
+#         python bias_detection.py #exit if bias detected
+
+#    - name: 'gcr.io/cloud-builders/gsutil'
+#     id: 'upload-model'
+#     entrypoint: 'bash'
+#     args:
+#       - '-c'
+#       - |
+#         TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+#         MODEL_DIR="gs://himas-mlops-models/models/$${TIMESTAMP}_$${BUILD_ID}"
+        
+#         echo "Uploading model to: $$MODEL_DIR"
+#         gsutil cp /workspace/models/himas_federated_mortality_model.keras $${MODEL_DIR}/himas_federated_mortality_model.keras
+        
+#         # Also save the timestamp to use in next step
+#         echo $$MODEL_DIR > /workspace/model_gcs_path.txt
+
+#   - name: 'gcr.io/cloud-builders/gsutil'
+#     id: 'upload-results'
+#     args:
+#       - '-m'
+#       - 'cp'
+#       - '-r'
+#       - '/workspace/evaluation_results/'
+#       - 'gs://himas-mlops-models/evaluation-results/$BUILD_ID/'
+
+#   - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#     id: 'register-model-vertex'
+#     entrypoint: 'bash'
+#     args:
+#       - '-c'
+#       - |
+#         # Extract metrics from evaluation results
+#         cd /workspace
+#         ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
+#         REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
+#         PREC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .precision' evaluation_results/*.json)
+        
+#         echo "Registering model in Vertex AI Model Registry..."
+#         echo "Accuracy: $$ACC | Recall: $$REC | Precision: $$PREC"
+        
+#         # Register model in Vertex AI Model Registry
+#         gcloud ai models upload \
+#           --region=us-central1 \
+#           --display-name=himas-federated-mortality-model \
+#           --description="Federated learning model for ICU mortality prediction - Build $BUILD_ID" \
+#           --artifact-uri=gs://himas-mlops-models/models/model_$BUILD_ID.keras \
+#           --container-image-uri=gcr.io/$PROJECT_ID/himas-training:$BUILD_ID \
+#           --version-aliases=build-$BUILD_ID,latest \
+#           --project=$PROJECT_ID
+        
+#         echo "✅ Model registered in Vertex AI Model Registry"
+
+
+# images:
+#   - 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+#   - 'gcr.io/$PROJECT_ID/himas-training:latest'
+
+# options:
+#   machineType: 'E2_HIGHCPU_8'
+#   logging: CLOUD_LOGGING_ONLY
+
+# timeout: '3600s'
+
+
 #change made2
 steps:
   - name: 'gcr.io/cloud-builders/docker'
@@ -26,7 +166,19 @@ steps:
         echo "Starting training with federated_demo..."
         flwr run .
         mkdir -p /workspace/models
-        cp models/himas_federated_mortality_model.keras /workspace/models/
+        
+        # Find the model file wherever it was saved
+        MODEL_FILE=$$(find models -name "*.keras" -type f | head -1)
+        
+        if [ -z "$$MODEL_FILE" ]; then
+          echo "❌ No model file found!"
+          ls -lR models/
+          exit 1
+        fi
+        
+        echo "✅ Found model: $$MODEL_FILE"
+        cp $$MODEL_FILE /workspace/models/himas_federated_mortality_model.keras
+        echo "✅ Model copied to workspace:"
         ls -lh /workspace/models/
 
   - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
@@ -70,61 +222,122 @@ steps:
     args:
       - '-c'
       - |
+        cp -r /workspace/PoC/Model-Pipeline/himas-model-pipeline/* /app/
+        cd /app
+        cp -r /workspace/evaluation_results .
+        python bias_detection.py
+
+  - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
+    id: 'compare-with-previous'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
         cd /workspace
-        AGG_ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
-        AGG_REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
-        BIAS=false
-        for h in hospital_a hospital_b hospital_c; do
-          A=$$(jq ".[] | select(.hospital==\"$$h\") | .accuracy" evaluation_results/*.json)
-          R=$$(jq ".[] | select(.hospital==\"$$h\") | .recall" evaluation_results/*.json)
-          AD=$$(echo "$$AGG_ACC - $$A" | bc -l | awk '{if($$1<0)print -$$1; else print $$1}')
-          RD=$$(echo "$$AGG_REC - $$R" | bc -l | awk '{if($$1<0)print -$$1; else print $$1}')
-          if (( $$(echo "$$AD > 0.05" | bc -l) )) || (( $$(echo "$$RD > 0.07" | bc -l) )); then
-            BIAS=true
-          fi
-        done
-        if [ "$$BIAS" = true ]; then
-          exit 1
+        
+        echo "Checking for previous model..."
+        
+        # Get current model metrics
+        NEW_ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
+        NEW_REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
+        
+        echo "New model - Accuracy: $$NEW_ACC, Recall: $$NEW_REC"
+        
+        # Try to get the latest previous model from GCS
+        PREV_BUILD=$$(gsutil ls gs://himas-mlops-models/evaluation-results/ | sort -r | sed -n '2p' | xargs basename)
+        
+        if [ -z "$$PREV_BUILD" ]; then
+          echo "No previous model found. This is the first model - proceeding."
+          exit 0
         fi
-        echo "No bias detected"
+        
+        echo "Found previous build: $$PREV_BUILD"
+        
+        # Download previous model's metrics
+        mkdir -p prev_results
+        gsutil cp gs://himas-mlops-models/evaluation-results/$$PREV_BUILD/*.json prev_results/ || {
+          echo "Could not fetch previous results. Proceeding with current model."
+          exit 0
+        }
+        
+        # Get previous model metrics
+        PREV_ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' prev_results/*.json)
+        PREV_REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' prev_results/*.json)
+        
+        echo "Previous model - Accuracy: $$PREV_ACC, Recall: $$PREV_REC"
+        
+        # Compare models
+        ACC_DIFF=$$(echo "$$NEW_ACC - $$PREV_ACC" | bc -l)
+        REC_DIFF=$$(echo "$$NEW_REC - $$PREV_REC" | bc -l)
+        
+        echo "Accuracy difference: $$ACC_DIFF"
+        echo "Recall difference: $$REC_DIFF"
+        
+        # Rollback if new model is significantly worse (>2% drop)
+        if (( $$(echo "$$ACC_DIFF < -0.02" | bc -l) )) || (( $$(echo "$$REC_DIFF < -0.02" | bc -l) )); then
+          echo "❌ ROLLBACK: New model performs worse than previous model"
+          echo "   Previous: Acc=$$PREV_ACC, Rec=$$PREV_REC"
+          echo "   New:      Acc=$$NEW_ACC, Rec=$$NEW_REC"
+          exit 1
+        else
+          echo "✅ New model is better or comparable. Proceeding."
+          exit 0
+        fi
 
   - name: 'gcr.io/cloud-builders/gsutil'
     id: 'upload-model'
+    entrypoint: 'bash'
     args:
-      - 'cp'
-      - '/workspace/models/himas_federated_mortality_model.keras'
-      - 'gs://himas-mlops-models/models/model_$BUILD_ID.keras'
+      - '-c'
+      - |
+        TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+        MODEL_DIR="gs://himas-mlops-models/models/$${TIMESTAMP}_$$BUILD_ID"
+        
+        echo "Uploading model to: $$MODEL_DIR"
+        gsutil cp /workspace/models/himas_federated_mortality_model.keras $${MODEL_DIR}/himas_federated_mortality_model.keras
+        
+        # Save path for registry step
+        echo $$MODEL_DIR > /workspace/model_gcs_path.txt
+        echo "✅ Model uploaded"
 
   - name: 'gcr.io/cloud-builders/gsutil'
     id: 'upload-results'
+    entrypoint: 'bash'
     args:
-      - '-m'
-      - 'cp'
-      - '-r'
-      - '/workspace/evaluation_results/'
-      - 'gs://himas-mlops-models/evaluation-results/$BUILD_ID/'
+      - '-c'
+      - |
+        TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+        RESULTS_DIR="gs://himas-mlops-models/evaluation-results/$${TIMESTAMP}_$$BUILD_ID"
+        
+        echo "Uploading results to: $$RESULTS_DIR"
+        gsutil -m cp -r /workspace/evaluation_results/* $${RESULTS_DIR}/
+        echo "✅ Results uploaded"
 
-  - name: 'gcr.io/cloud-builders/gcloud'
+  - name: 'gcr.io/$PROJECT_ID/himas-training:$BUILD_ID'
     id: 'register-model-vertex'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        # Extract metrics from evaluation results
         cd /workspace
+        
+        # Read model path from previous step
+        MODEL_DIR=$$(cat model_gcs_path.txt)
+        
+        # Extract metrics
         ACC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .accuracy' evaluation_results/*.json)
         REC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .recall' evaluation_results/*.json)
         PREC=$$(jq '.[] | select(.hospital=="AGGREGATED") | .precision' evaluation_results/*.json)
         
         echo "Registering model in Vertex AI Model Registry..."
+        echo "Model location: $$MODEL_DIR"
         echo "Accuracy: $$ACC | Recall: $$REC | Precision: $$PREC"
         
-        # Register model in Vertex AI Model Registry
         gcloud ai models upload \
           --region=us-central1 \
           --display-name=himas-federated-mortality-model \
-          --description="Federated learning model for ICU mortality prediction - Build $BUILD_ID" \
-          --artifact-uri=gs://himas-mlops-models/models/model_$BUILD_ID.keras \
+          --description="Federated learning model - Build $BUILD_ID" \
+          --artifact-uri=$${MODEL_DIR}/ \
           --container-image-uri=gcr.io/$PROJECT_ID/himas-training:$BUILD_ID \
           --version-aliases=build-$BUILD_ID,latest \
           --project=$PROJECT_ID
